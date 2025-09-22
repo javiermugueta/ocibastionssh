@@ -155,7 +155,8 @@ if [ -z "$SSH_CMD" ]; then
   exit 3
 fi
 
-FORWARD_CMD=$(echo "$SSH_CMD" | sed "s|<localPort>|$LOCAL_PORT|; s|-i [^ ]*|-i $BASTION_PRIVATE_KEY|")
+#FORWARD_CMD=$(echo "$SSH_CMD" | sed "s|<localPort>|$LOCAL_PORT|; s|-i [^ ]*|-i $BASTION_PRIVATE_KEY|")
+FORWARD_CMD=$(echo "$SSH_CMD" | sed "s|<localPort>|$LOCAL_PORT|; s|-i [^ ]*|-i $BASTION_PRIVATE_KEY|")" -o ServerAliveInterval=30 -o ServerAliveCountMax=360"
 echo
 echo "Run the following command in a dedicated terminal for SSH port forwarding (must remain open):"
 echo "$FORWARD_CMD"
