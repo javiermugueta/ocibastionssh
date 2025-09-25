@@ -81,6 +81,11 @@ EXISTING_SESSION_ID=$(oci bastion session list \
       (.["lifecycle-state"] == "ACTIVE" or .["lifecycle-state"] == "SUCCEEDED")
     ) | .id' | head -n1)
 
+# Función para convertir la fecha ISO 8601 a timestamp Unix
+iso8601_to_timestamp() {
+  date -d "$1" +%s 2>/dev/null || date -jf "%Y-%m-%dT%H:%M:%S%z" "$1" +%s 2>/dev/null
+}
+
 generate_and_create_session() {
   TMP_PREFIX=$(mktemp -u /tmp/oci_bastion_XXXXXXXX)
   BASTION_PRIVATE_KEY="${TMP_PREFIX}"
@@ -118,20 +123,46 @@ generate_and_create_session() {
 }
 
 if [ -n "$EXISTING_SESSION_ID" ]; then
-  if [ -f "$SESSION_CACHE" ]; then
-    BASTION_PRIVATE_KEY=$(grep "^$EXISTING_SESSION_ID|" "$SESSION_CACHE" | head -n1 | cut -d'|' -f2)
-  else
-    BASTION_PRIVATE_KEY=""
-  fi
-  if [ -f "$BASTION_PRIVATE_KEY" ]; then
-    SESSION_ID="$EXISTING_SESSION_ID"
-    echo "Reusing existing Bastion session: $SESSION_ID"
-  else
-    echo "WARNING: Private key for existing session not found. Creating a new Bastion session..."
+  echo "Found existing session: $EXISTING_SESSION_ID"
+  # Obtener detalles de la sesión para verificar el tiempo de expiración
+  SESSION_DETAILS=$(oci bastion session get \
+    --region "$REGION" \
+    --session-id "$EXISTING_SESSION_ID" \
+    --output json)
+
+  # Extraer el tiempo de creación y el TTL de la sesión
+  CREATED_TIME=$(echo "$SESSION_DETAILS" | jq -r '.data."time-created"')
+  SESSION_TTL=$(echo "$SESSION_DETAILS" | jq -r '.data."session-ttl-in-seconds"')
+
+  # Calcular el tiempo de expiración
+  CREATED_TIMESTAMP=$(iso8601_to_timestamp "$CREATED_TIME")
+  CURRENT_TIMESTAMP=$(date +%s)
+  EXPIRY_TIMESTAMP=$((CREATED_TIMESTAMP + SESSION_TTL))
+  TIME_LEFT=$((EXPIRY_TIMESTAMP - CURRENT_TIMESTAMP))
+
+  # Verificar si faltan menos de 30 minutos (1800 segundos) para que caduque
+  if [ "$TIME_LEFT" -lt 1800 ]; then
+    echo "Existing session will expire in less than 10 minutes ($TIME_LEFT seconds left). Creating a new session..."
     if [ -f "$SESSION_CACHE" ]; then
       grep -v "^$EXISTING_SESSION_ID|" "$SESSION_CACHE" > "${SESSION_CACHE}.tmp" && mv "${SESSION_CACHE}.tmp" "$SESSION_CACHE"
     fi
     generate_and_create_session
+  else
+    if [ -f "$SESSION_CACHE" ]; then
+      BASTION_PRIVATE_KEY=$(grep "^$EXISTING_SESSION_ID|" "$SESSION_CACHE" | head -n1 | cut -d'|' -f2)
+    else
+      BASTION_PRIVATE_KEY=""
+    fi
+    if [ -f "$BASTION_PRIVATE_KEY" ]; then
+      SESSION_ID="$EXISTING_SESSION_ID"
+      echo "Reusing existing Bastion session: $SESSION_ID (expires in $TIME_LEFT seconds)"
+    else
+      echo "WARNING: Private key for existing session not found. Creating a new Bastion session..."
+      if [ -f "$SESSION_CACHE" ]; then
+        grep -v "^$EXISTING_SESSION_ID|" "$SESSION_CACHE" > "${SESSION_CACHE}.tmp" && mv "${SESSION_CACHE}.tmp" "$SESSION_CACHE"
+      fi
+      generate_and_create_session
+    fi
   fi
 else
   generate_and_create_session
@@ -155,7 +186,6 @@ if [ -z "$SSH_CMD" ]; then
   exit 3
 fi
 
-#FORWARD_CMD=$(echo "$SSH_CMD" | sed "s|<localPort>|$LOCAL_PORT|; s|-i [^ ]*|-i $BASTION_PRIVATE_KEY|")
 FORWARD_CMD=$(echo "$SSH_CMD" | sed "s|<localPort>|$LOCAL_PORT|; s|-i [^ ]*|-i $BASTION_PRIVATE_KEY|")" -o ServerAliveInterval=30 -o ServerAliveCountMax=360"
 echo
 echo "Run the following command in a dedicated terminal for SSH port forwarding (must remain open):"
